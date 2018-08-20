@@ -1,6 +1,8 @@
 from pyinstruments import CurveDB
 import matplotlib.pylab as plt
+import matplotlib.colors as mcolors
 import numpy as np
+import os.path as osp
 from scipy.optimize import leastsq
 from scipy.constants import k, hbar, h
 
@@ -8,7 +10,8 @@ from scipy.constants import k, hbar, h
 
 class OMIT(object):
 
-    def __init__(self, curve_id, large_curve_id):
+
+    def __init_old__(self, curve_id, large_curve_id):
         self.curve_id = curve_id
         self.curve=CurveDB.objects.get(id=curve_id)
         self.n_curves = len(self.curve.childs.all())
@@ -30,6 +33,51 @@ class OMIT(object):
         self.DELTA_PUMP = self.PUMP_FREQUENCY - self.CAVITY_FREQUENCY
         self.MECHANICAL_FREQUENCY = self.curve.params['mechanical_frequency']
         self.datas = []
+        self.cbar_ax = None
+        self.fig_suplots = None
+        self.fig_large = None
+        self.dir=None
+
+    def __init__(self, curve_id_s, large_curve_id):
+        self.curve_id_s = curve_id_s
+        self.curves=[CurveDB.objects.get(id=curve_id) for curve_id in
+                     self.curve_id_s]
+        self.curves_data = [child for curve
+                            in self.curves for child in curve.childs.all() ]
+        self.n_curves = np.sum([len(curve.childs.all()) for curve in
+                                self.curves])
+        self.large_curve_id = large_curve_id
+        self.large_curve = CurveDB.objects.get(id=large_curve_id)
+        self.portion_of_large_curve = self.large_curve.childs.first().childs.first()
+        self.CAVITY_FREQUENCY = self.portion_of_large_curve.params["x0"]
+        self.cavity_Qi = self.portion_of_large_curve.params["Q_i"]
+        self.cavity_Qc = self.portion_of_large_curve.params["Q_c"]
+        self.cavity_Q = self.portion_of_large_curve.params["Q"]
+        self.ETA_C = self.cavity_Qi / (self.cavity_Qc + self.cavity_Qi)
+        self.KAPPA_HZ = self.CAVITY_FREQUENCY / self.cavity_Q
+        self.KAPPA_C_HZ = self.CAVITY_FREQUENCY / self.cavity_Qc
+        self.normalization = np.conjugate(0.5*(np.mean(
+            self.large_curve.data.get_values()[
+                                     :10])+np.mean(
+            self.large_curve.data.get_values()[-10:])))
+        self.PUMP_FREQUENCIES = [curve.params["pump_frequency"] for curve in
+                                 self.curves]
+        assert (np.array(self.PUMP_FREQUENCIES)-self.PUMP_FREQUENCIES[
+            0]).any()==False
+        self.PUMP_FREQUENCY = self.PUMP_FREQUENCIES[0]
+        del self.PUMP_FREQUENCIES
+        self.DELTA_PUMP = self.PUMP_FREQUENCY - self.CAVITY_FREQUENCY
+        self.MECHANICAL_FREQUENCIES = [curve.params['mechanical_frequency']
+                                       for curve in self.curves]
+        assert (np.array(self.MECHANICAL_FREQUENCIES)-self.MECHANICAL_FREQUENCIES[
+            0]).any()==False
+        self.MECHANICAL_FREQUENCY = self.MECHANICAL_FREQUENCIES[0]
+        del self.MECHANICAL_FREQUENCIES
+        self.datas = []
+        self.cbar_ax = None
+        self.fig_suplots = None
+        self.fig_large = None
+        self.dir=None
 
     def transmission(self, nu_probe, n, nu_pump, nu_cav,
                      kappa_cav_hz,
@@ -100,23 +148,67 @@ class OMIT(object):
                        nu_probe, n, data, nu_m in zip(probes, ns,
                                                 datas, nu_m_s_all)]).flatten()
 
-    def plot_global_fit(self, one_plot=False, plot_guess=True):
-        for ind, tuple in enumerate(zip(self.datas, self.ns)) :
-            datas, n = tuple
+    def plot_global_fit(self, one_plot=False, plot_guess=True, plot_fit=True,
+                        save=False):
+        for ind, tuple in enumerate(zip(self.datas, self.ns, self.probes)) :
+            datas, n, probes = tuple
             if (ind==0 and one_plot) or not one_plot:
-                plt.figure()
+                self.fig_subplots = plt.figure()
             self.probes_fit = np.linspace(np.min(self.probes), np.max(
                 self.probes), 10000)
-            self.plot_re_im(self.probes_fit, self.fit_func(self.probes_fit, n,
+            if plot_fit:
+                self.plot_re_im((
+                                    np.array(
+                                        self.probes_fit)-self.PUMP_FREQUENCY-self.MECHANICAL_FREQUENCY), self.fit_func(self.probes_fit, n,
                                                    self.fitted_params),
                             label='fit')
             if plot_guess:
-                self.plot_re_im(self.probes_fit, self.fit_func(self.probes_fit, n,
+                self.plot_re_im((
+                                    np.array(
+                                        self.probes_fit)-self.PUMP_FREQUENCY-self.MECHANICAL_FREQUENCY),
+                                 self.fit_func(
+                    self.probes_fit, n,
                                                        self.guess()),
                             label='guess')
-            self.plot_re_im(self.probes, datas/self.normalization, label='raw data')
+            self.plot_re_im((np.array(probes)-self.PUMP_FREQUENCY-self.MECHANICAL_FREQUENCY),
+                            datas/self.normalization, label='raw data',
+                            color=plt.cm.viridis(ind/len(list(zip(self.datas, self.ns)))))
             if not one_plot:
                 plt.legend()
+                plt.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} kHz, '
+                             r'n={:}'.format(
+                    self.CAVITY_FREQUENCY / 1e9,
+                    self.MECHANICAL_FREQUENCY / 1e3,
+                    int(n)))
+                if save:
+                    if self.dir is None:
+                        self.dir = self.curve.get_or_create_dir()
+                    plt.savefig(osp.join(self.dir, 'fit_n={:}.png'.format(
+                        int(n))),
+                                      dpi=200)
+
+        if one_plot:
+            plt.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} kHz'.format(
+            self.CAVITY_FREQUENCY/1e9, self.MECHANICAL_FREQUENCY/1e3))
+            self.plot_color_bar()
+        if save and one_plot:
+            if self.dir is None:
+                self.dir = self.curve.get_or_create_dir()
+            self.fig_subplots.savefig(osp.join(self.dir, 'display.png'),
+                                      dpi=200)
+
+    def plot_color_bar(self):
+        nValues = np.array(self.ns)
+        normalize = mcolors.LogNorm(vmin=nValues.min(), vmax=nValues.max())
+        # setup the colorbar
+        self.scalarmappaple = plt.cm.ScalarMappable(norm=normalize,
+                                                 cmap=plt.cm.viridis)
+        self.scalarmappaple.set_array(nValues)
+        if self.cbar_ax is None:
+            self.cbar_ax = self.fig_subplots.add_axes([0.85, 0.15, 0.05, 0.7])
+        self.cb = plt.colorbar(self.scalarmappaple, cax=self.cbar_ax)
+        plt.subplots_adjust(right=0.8, top=0.9)
+        self.cb.set_label('n', labelpad=-10)
 
 
     def plot_fit(self, n, datas):
@@ -132,10 +224,21 @@ class OMIT(object):
 
 
     def plot_re_im(self, x, z, **kwds):
-        sub = plt.subplot(211)
+        if self.fig_subplots is not None:
+            self.sub_ax = self.fig_subplots.add_subplot(211)
+        else:
+            self.sub_ax = plt.add_suplot(211)
         plt.plot(x, np.real(z), **kwds)
         plt.ylim([-1,1])
-        plt.subplot(212, sharex=sub)
+        plt.subplot(212, sharex=self.sub_ax)
+        plt.plot(x, np.imag(z), **kwds)
+        plt.ylim([-1, 1])
+
+    def plot_re_im_large(self, x, z, **kwds):
+        self.sub_ax_large = self.fig_large.add_subplot(211)
+        plt.plot(x, np.real(z), **kwds)
+        plt.ylim([-1,1])
+        plt.subplot(212, sharex=self.sub_ax_large)
         plt.plot(x, np.imag(z), **kwds)
         plt.ylim([-1, 1])
 
@@ -145,7 +248,7 @@ class OMIT(object):
         return a_squared*4*self.KAPPA_C_HZ/(
             self.KAPPA_HZ**2+4.*self.DELTA_PUMP**2)
 
-    def get_data_from_scans(self):
+    def get_data_from_scans_old(self):
         ns_all = []
         ns = []
         probes = []
@@ -176,14 +279,48 @@ class OMIT(object):
             self.curve.childs.all()))]
         self.datas = datas
 
+    def get_data_from_scans(self):
+        ns_all = []
+        ns = []
+        self.probes_all = []
+        self.probes = []
+        datas_all = []
+        datas = []
+        for curve in self.curves:
+            for child in curve.childs.all():
+                if not "attenuation_pump" in child.params.keys():
+                    ATTENUATION_PUMP = child.params["attenuation"] + 40
+                    child.params["attenuation_pump"] = ATTENUATION_PUMP
+                    child.save()
+                else:
+                    ATTENUATION_PUMP = child.params["attenuation_pump"]
+                power = child.params["Sideband_power"]
+                data = np.conjugate(np.array(child.data.get_values()))
+                probe = np.array(child.data.index)
+                n = self.get_number_of_photons(power, ATTENUATION_PUMP)
+                ns.append(n)
+                datas.append(data)
+                self.probes.append(probe)
+                for t, f in zip(data, probe):
+                    datas_all.append(t)
+                    self.probes_all.append(f)
+                    ns_all.append(n)
+        self.ns_all = ns_all
+        self.ns = ns
+        self.datas_all = datas_all
+        #self.probes = self.probes_all[0]
+        #1/0
+        self.datas = datas
+
     def plot_large_guess(self):
-        plt.figure()
-        self.plot_re_im(self.large_curve.data.index,
+        if self.fig_large is None:
+            self.fig_large=plt.figure()
+        self.plot_re_im_large(self.large_curve.data.index,
                    np.conjugate(self.large_curve.data.get_values()) /
                         self.normalization,
                         label='raw')
         params_large_guess = 0,1000,1000
-        self.plot_re_im(self.large_curve.data.index,
+        self.plot_re_im_large(self.large_curve.data.index,
                    self.fit_func(np.array(self.large_curve.data.index),
                                  0,
                                  params_large_guess)
@@ -193,7 +330,7 @@ class OMIT(object):
     def guess(self):
         Q_m = 4e6
         ind = int(np.argmax(self.ns))
-        grandchild = self.curve.childs.all()[ind]
+        grandchild = self.curves_data[ind]
         for fits in grandchild.childs.all():
             fits.delete()
         fit = grandchild.fit('lorentz_complex_sam', autosave=True)
