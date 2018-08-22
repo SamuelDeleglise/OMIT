@@ -11,33 +11,6 @@ from scipy.constants import k, hbar, h
 class OMIT(object):
 
 
-    def __init_old__(self, curve_id, large_curve_id):
-        self.curve_id = curve_id
-        self.curve=CurveDB.objects.get(id=curve_id)
-        self.n_curves = len(self.curve.childs.all())
-        self.large_curve_id = large_curve_id
-        self.large_curve = CurveDB.objects.get(id=large_curve_id)
-        self.portion_of_large_curve = self.large_curve.childs.first().childs.first()
-        self.CAVITY_FREQUENCY = self.portion_of_large_curve.params["x0"]
-        self.cavity_Qi = self.portion_of_large_curve.params["Q_i"]
-        self.cavity_Qc = self.portion_of_large_curve.params["Q_c"]
-        self.cavity_Q = self.portion_of_large_curve.params["Q"]
-        self.ETA_C = self.cavity_Qi / (self.cavity_Qc + self.cavity_Qi)
-        self.KAPPA_HZ = self.CAVITY_FREQUENCY / self.cavity_Q
-        self.KAPPA_C_HZ = self.CAVITY_FREQUENCY / self.cavity_Qc
-        self.normalization = np.conjugate(0.5*(np.mean(
-            self.large_curve.data.get_values()[
-                                     :10])+np.mean(
-            self.large_curve.data.get_values()[-10:])))
-        self.PUMP_FREQUENCY = self.curve.params["pump_frequency"]
-        self.DELTA_PUMP = self.PUMP_FREQUENCY - self.CAVITY_FREQUENCY
-        self.MECHANICAL_FREQUENCY = self.curve.params['mechanical_frequency']
-        self.datas = []
-        self.cbar_ax = None
-        self.fig_suplots = None
-        self.fig_large = None
-        self.dir=None
-
     def __init__(self, curve_id_s, large_curve_id):
         self.curve_id_s = curve_id_s
         self.curves=[CurveDB.objects.get(id=curve_id) for curve_id in
@@ -75,9 +48,12 @@ class OMIT(object):
         del self.MECHANICAL_FREQUENCIES
         self.datas = []
         self.cbar_ax = None
+        self.re_ax=None
+        self.im_ax=None
         self.fig_suplots = None
         self.fig_large = None
         self.dir=None
+        self.one_plot=False
 
     def transmission(self, nu_probe, n, nu_pump, nu_cav,
                      kappa_cav_hz,
@@ -150,6 +126,7 @@ class OMIT(object):
 
     def plot_global_fit(self, one_plot=False, plot_guess=True, plot_fit=True,
                         save=False):
+        self.one_plot=one_plot
         for ind, tuple in enumerate(zip(self.datas, self.ns, self.probes)) :
             datas, n, probes = tuple
             if (ind==0 and one_plot) or not one_plot:
@@ -188,12 +165,19 @@ class OMIT(object):
                                       dpi=200)
 
         if one_plot:
+            plt.xlabel(r'Detuning from $\nu_{pump}+\nu_m$ (Hz)')
+            if self.re_ax is None:
+                self.re_ax=self.fig_subplots.add_subplot(211)
+            self.re_ax.set_ylabel(r'Re($\mathcal{T}$) (a.u.)')
+            if self.im_ax is None:
+                self.im_ax = self.fig_subplots.add_subplot(212)
+            self.im_ax.set_ylabel(r'Im($\mathcal{T}$) (a.u.)')
             plt.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} kHz'.format(
             self.CAVITY_FREQUENCY/1e9, self.MECHANICAL_FREQUENCY/1e3))
             self.plot_color_bar()
         if save and one_plot:
             if self.dir is None:
-                self.dir = self.curve.get_or_create_dir()
+                self.dir = self.curves[0].get_or_create_dir()
             self.fig_subplots.savefig(osp.join(self.dir, 'display.png'),
                                       dpi=200)
 
@@ -224,15 +208,21 @@ class OMIT(object):
 
 
     def plot_re_im(self, x, z, **kwds):
-        if self.fig_subplots is not None:
-            self.sub_ax = self.fig_subplots.add_subplot(211)
-        else:
-            self.sub_ax = plt.add_suplot(211)
-        plt.plot(x, np.real(z), **kwds)
-        plt.ylim([-1,1])
-        plt.subplot(212, sharex=self.sub_ax)
+        if self.fig_subplots is not None and self.re_ax is None and self.one_plot:
+            self.re_ax= self.fig_subplots.add_subplot(211)
+        elif self.fig_subplots is not None and not self.one_plot:
+            self.re_ax = self.fig_subplots.add_subplot(211)
+
+        self.re_ax.plot(x, np.real(z), **kwds)
+        #plt.ylim([-1,1])
+        #self.im_ax = plt.subplot(212, sharex=self.re_ax)
+        if self.fig_subplots is not None and self.im_ax is None and \
+                self.one_plot:
+            self.im_ax= self.fig_subplots.add_subplot(212)
+        elif self.fig_subplots is not None and not self.one_plot:
+            self.im_ax = self.fig_subplots.add_subplot(212)
         plt.plot(x, np.imag(z), **kwds)
-        plt.ylim([-1, 1])
+        #plt.ylim([-1, 1])
 
     def plot_re_im_large(self, x, z, **kwds):
         self.sub_ax_large = self.fig_large.add_subplot(211)
@@ -248,36 +238,6 @@ class OMIT(object):
         return a_squared*4*self.KAPPA_C_HZ/(
             self.KAPPA_HZ**2+4.*self.DELTA_PUMP**2)
 
-    def get_data_from_scans_old(self):
-        ns_all = []
-        ns = []
-        probes = []
-        datas_all = []
-        datas = []
-        for child in self.curve.childs.all():
-            if not "attenuation_pump" in child.params.keys():
-                ATTENUATION_PUMP = child.params["attenuation"] + 40
-                child.params["attenuation_pump"] = ATTENUATION_PUMP
-                child.save()
-            else:
-                ATTENUATION_PUMP = child.params["attenuation_pump"]
-            power = child.params["Sideband_power"]
-            data = np.conjugate(np.array(child.data.get_values()))
-            probe = np.array(child.data.index)
-            n = self.get_number_of_photons(power, ATTENUATION_PUMP)
-            ns.append(n)
-            datas.append(data)
-            for t, f in zip(data, probe):
-                datas_all.append(t)
-                probes.append(f)
-                ns_all.append(n)
-        self.probes_all = probes
-        self.ns_all = ns_all
-        self.ns = ns
-        self.datas_all = datas_all
-        self.probes = self.probes_all[:int(len(self.probes_all) / len(
-            self.curve.childs.all()))]
-        self.datas = datas
 
     def get_data_from_scans(self):
         ns_all = []
