@@ -3,9 +3,10 @@ import matplotlib.pylab as plt
 import matplotlib.colors as mcolors
 import numpy as np
 import os.path as osp
+import time, os
 from scipy.optimize import leastsq
 from scipy.constants import k, hbar, h
-
+from pyinstruments.datastore.settings import MEDIA_ROOT
 
 
 class OMIT(object):
@@ -50,9 +51,16 @@ class OMIT(object):
         self.cbar_ax = None
         self.re_ax=None
         self.im_ax=None
-        self.fig_suplots = None
+        self.abs_ax=None
+        self.re_ax_large=None
+        self.im_ax_large=None
+        self.abs_ax_large=None
+        self.fig_subplots = None
         self.fig_large = None
         self.dir=None
+        self.dir_large=None
+        self.filename_large=None
+        self.filename=None
         self.one_plot=False
 
     def transmission(self, nu_probe, n, nu_pump, nu_cav,
@@ -125,60 +133,102 @@ class OMIT(object):
                                                 datas, nu_m_s_all)]).flatten()
 
     def plot_global_fit(self, one_plot=False, plot_guess=True, plot_fit=True,
-                        save=False):
+                        save=False, abs=False, title=None, curves=1.,
+                        large=False, plot_color_bar=True, plot_title=True,
+                        xlabel=True):
         self.one_plot=one_plot
         for ind, tuple in enumerate(zip(self.datas, self.ns, self.probes)) :
-            datas, n, probes = tuple
-            if (ind==0 and one_plot) or not one_plot:
-                self.fig_subplots = plt.figure()
-            self.probes_fit = np.linspace(np.min(self.probes), np.max(
-                self.probes), 10000)
-            if plot_fit:
-                self.plot_re_im((
-                                    np.array(
-                                        self.probes_fit)-self.PUMP_FREQUENCY-self.MECHANICAL_FREQUENCY), self.fit_func(self.probes_fit, n,
-                                                   self.fitted_params),
-                            label='fit')
-            if plot_guess:
-                self.plot_re_im((
-                                    np.array(
-                                        self.probes_fit)-self.PUMP_FREQUENCY-self.MECHANICAL_FREQUENCY),
-                                 self.fit_func(
-                    self.probes_fit, n,
-                                                       self.guess()),
-                            label='guess')
-            self.plot_re_im((np.array(probes)-self.PUMP_FREQUENCY-self.MECHANICAL_FREQUENCY),
-                            datas/self.normalization, label='raw data',
-                            color=plt.cm.viridis(ind/len(list(zip(self.datas, self.ns)))))
-            if not one_plot:
-                plt.legend()
-                plt.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} kHz, '
-                             r'n={:}'.format(
-                    self.CAVITY_FREQUENCY / 1e9,
-                    self.MECHANICAL_FREQUENCY / 1e3,
-                    int(n)))
-                if save:
-                    if self.dir is None:
-                        self.dir = self.curve.get_or_create_dir()
-                    plt.savefig(osp.join(self.dir, 'fit_n={:}.png'.format(
-                        int(n))),
-                                      dpi=200)
+            if float(ind)/len(self.datas)<=curves:
+                datas, n, probes = tuple
+                if large:
+                    offset_freq = self.CAVITY_FREQUENCY
+                    scale_freq = 1e-6
+                else:
+                    offset_freq = \
+                        self.PUMP_FREQUENCY+self.MECHANICAL_FREQUENCY
+                    scale_freq=1.
+                if self.fig_subplots is None:
+                    if ((ind==0 and one_plot) or not one_plot):
+                        self.fig_subplots = plt.figure()
+                self.probes_fit = np.linspace(np.min(self.probes), np.max(
+                    self.probes), 10000)
+                if plot_fit:
+                    self.plot(scale_freq*(np.array(self.probes_fit)
+                                                    -offset_freq),
+                                        self.fit_func(self.probes_fit, n,
+                                                       self.fitted_params),abs,
+                                label='fit')
+                if plot_guess:
+                    self.plot(scale_freq*(np.array(self.probes_fit)
+                                          -offset_freq),
+                                     self.fit_func(self.probes_fit, n,
+                                                           self.guess()),
+                                abs,label='guess')
+                self.plot(scale_freq*(np.array(probes)
+                                      -offset_freq),
+                                datas/self.normalization, abs, label='raw data',
+                                color=plt.cm.viridis(ind/len(list(zip(self.datas, self.ns)))))
+                if not one_plot:
+                    plt.legend()
+                    if plot_title:
+                        if title is None:
+                            plt.suptitle(r'OMIT signal, $\nu_0=${:.2f} GHz, $\nu_m=${'
+                                         r':.2f} '
+                                         r'kHz, '
+                                     r'n={:}'.format(
+                            self.CAVITY_FREQUENCY / 1e9,
+                            self.MECHANICAL_FREQUENCY / 1e3,
+                            int(n)))
+                        else:
+                            plt.suptitle(title)
+                    if save:
+                        if self.dir is None:
+                            self.dir = self.curve.get_or_create_dir()
+                        plt.savefig(osp.join(self.dir, 'fit_n={:}.png'.format(
+                            int(n))),dpi=200)
+                        plt.savefig(osp.join(self.dir, 'fit_n={:}.pdf'.format(
+                            int(n))),dpi=200)
 
         if one_plot:
-            plt.xlabel(r'Detuning from $\nu_{pump}+\nu_m$ (Hz)')
-            if self.re_ax is None:
-                self.re_ax=self.fig_subplots.add_subplot(211)
-            self.re_ax.set_ylabel(r'Re($\mathcal{T}$) (a.u.)')
-            if self.im_ax is None:
-                self.im_ax = self.fig_subplots.add_subplot(212)
-            self.im_ax.set_ylabel(r'Im($\mathcal{T}$) (a.u.)')
-            plt.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} kHz'.format(
-            self.CAVITY_FREQUENCY/1e9, self.MECHANICAL_FREQUENCY/1e3))
-            self.plot_color_bar()
+            if xlabel:
+                if abs:
+                    self.abs_ax.set_xlabel(r'Detuning from $\nu_{pump}+\nu_m$ (Hz)')
+                else:
+                    self.im_ax.set_xlabel(r'Detuning from $\nu_{pump}+\nu_m$ (Hz)')
+            if not abs:
+                if self.re_ax is None:
+                    self.re_ax=self.fig_subplots.add_subplot(211)
+                self.re_ax.set_ylabel(r'Re($\mathcal{T}$) (a.u.)')
+                if self.im_ax is None:
+                    self.im_ax = self.fig_subplots.add_subplot(212)
+                self.im_ax.set_ylabel(r'Im($\mathcal{T}$) (a.u.)')
+            else:
+                if self.abs_ax is None:
+                    self.abs_ax = self.fig_subplots.add_subplot(
+                        111)
+                self.abs_ax.set_ylabel(r'|$\mathcal{T}$| (a.u.)')
+            if title is None:
+                plt.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} kHz'.format(
+                self.CAVITY_FREQUENCY/1e9, self.MECHANICAL_FREQUENCY/1e3))
+            else:
+                plt.suptitle(title)
+            if plot_color_bar:
+                self.plot_color_bar()
+
         if save and one_plot:
             if self.dir is None:
-                self.dir = self.curves[0].get_or_create_dir()
-            self.fig_subplots.savefig(osp.join(self.dir, 'display.png'),
+                self.dir = MEDIA_ROOT+time.strftime("/%Y/%m/%d",
+                                                    time.gmtime())
+                if not osp.exists(self.dir):
+                    os.makedirs(self.dir)
+            if self.filename is None:
+                self.filename = 'plot.png'
+            self.fig_subplots.savefig(self.dir+'/'+
+                                            self.filename)
+            self.fig_subplots.savefig((self.dir+'/'+
+                                            self.filename).replace('.png',
+                                                                   '.pdf'))
+            self.fig_subplots.savefig(osp.join(self.curves[0].get_or_create_dir(), 'display.png'),
                                       dpi=200)
 
     def plot_color_bar(self):
@@ -194,42 +244,55 @@ class OMIT(object):
         plt.subplots_adjust(right=0.8, top=0.9)
         self.cb.set_label('n', labelpad=-10)
 
+    def plot(self, x, y, abs=False, **kwds):
+        if abs:
+            self.plot_abs(x,y,**kwds)
+        else:
+            self.plot_re_im(x,y,**kwds)
 
-    def plot_fit(self, n, datas):
-        self.plot_re_im(self.probes, self.fit_func(self.probes, n,
-                                                   self.fitted_params),
-                        label='fit')
-        self.plot_re_im(self.probes, self.fit_func(self.probes, n,
-                                                   self.guess()),
-                        label='guess')
-        self.plot_re_im(self.probes, datas / self.normalization,
-                        label='raw data')
-        plt.legend()
 
 
     def plot_re_im(self, x, z, **kwds):
-        if self.fig_subplots is not None and self.re_ax is None and self.one_plot:
+        assert self.fig_subplots is not None
+        if (self.re_ax is None and self.one_plot)or (not self.one_plot) :
             self.re_ax= self.fig_subplots.add_subplot(211)
-        elif self.fig_subplots is not None and not self.one_plot:
-            self.re_ax = self.fig_subplots.add_subplot(211)
 
         self.re_ax.plot(x, np.real(z), **kwds)
         #plt.ylim([-1,1])
         #self.im_ax = plt.subplot(212, sharex=self.re_ax)
-        if self.fig_subplots is not None and self.im_ax is None and \
-                self.one_plot:
+        if (self.im_ax is None and self.one_plot) or (not self.one_plot):
             self.im_ax= self.fig_subplots.add_subplot(212)
-        elif self.fig_subplots is not None and not self.one_plot:
-            self.im_ax = self.fig_subplots.add_subplot(212)
-        plt.plot(x, np.imag(z), **kwds)
+        self.im_ax.plot(x, np.imag(z), **kwds)
         #plt.ylim([-1, 1])
 
+    def plot_abs(self, x, z, **kwds):
+        assert self.fig_subplots is not None
+        if (self.abs_ax is None and self.one_plot) or (not self.one_plot):
+            self.abs_ax=self.fig_subplots.add_subplot(111)
+        self.abs_ax.plot(x, np.abs(z), **kwds)
+
+    def plot_large(self, x, z, abs, **kwds):
+        if abs:
+            self.plot_abs_large(x,z,**kwds)
+        else:
+            self.plot_re_im_large(x,z,**kwds)
+
+    def plot_abs_large(self, x, z, **kwds):
+        assert self.fig_large is not None
+        if self.abs_ax_large is None:
+            self.abs_ax_large = self.fig_large.add_subplot(111)
+        self.abs_ax_large.plot(x, z, **kwds)
+
     def plot_re_im_large(self, x, z, **kwds):
-        self.sub_ax_large = self.fig_large.add_subplot(211)
-        plt.plot(x, np.real(z), **kwds)
+        assert self.fig_large is not None
+        if self.re_ax_large is None:
+            self.re_ax_large = self.fig_large.add_subplot(211)
+        self.re_ax_large.plot(x, np.real(z), **kwds)
         plt.ylim([-1,1])
-        plt.subplot(212, sharex=self.sub_ax_large)
-        plt.plot(x, np.imag(z), **kwds)
+        if self.im_ax_large is None:
+            self.im_ax_large = self.fig_large.add_subplot(212,
+                                                   sharex=self.re_ax_large)
+        self.im_ax_large.plot(x, np.imag(z), **kwds)
         plt.ylim([-1, 1])
 
     def get_number_of_photons(self, power, attenuation):
@@ -272,20 +335,40 @@ class OMIT(object):
         #1/0
         self.datas = datas
 
-    def plot_large_guess(self):
+    def plot_large_guess(self, abs=False, plot_fit=True, legend=True,
+                         save=False):
         if self.fig_large is None:
             self.fig_large=plt.figure()
-        self.plot_re_im_large(self.large_curve.data.index,
+        freqs = (self.large_curve.data.index-self.CAVITY_FREQUENCY)/1e6
+        self.plot_large(freqs,
                    np.conjugate(self.large_curve.data.get_values()) /
-                        self.normalization,
+                        self.normalization, abs,
                         label='raw')
         params_large_guess = 0,1000,1000
-        self.plot_re_im_large(self.large_curve.data.index,
+        if plot_fit:
+            self.plot_large(freqs,
                    self.fit_func(np.array(self.large_curve.data.index),
                                  0,
                                  params_large_guess)
-                        , label="fit 0 coop")
-        plt.legend()
+                        ,abs, label="fit 0 coop")
+        if legend:
+            plt.legend()
+        self.fig_large.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} '
+                                r'kHz'.format(
+            self.CAVITY_FREQUENCY / 1e9, self.MECHANICAL_FREQUENCY / 1e3))
+
+        if save:
+            if self.dir_large is None:
+                self.dir_large = MEDIA_ROOT+time.strftime("/%Y/%m/%d",
+                                                        time.gmtime())
+                if not osp.exists(self.dir_large):
+                    os.makedirs(self.dir_large)
+            if self.filename_large is None:
+                self.filename_large='large_plot.png'
+            self.fig_large.savefig(self.dir_large+'/'+
+                                            self.filename_large)
+            self.fig_large.savefig((self.dir_large + '/' +
+                                   self.filename_large).replace('.png', '.pdf'))
 
     def guess(self):
         Q_m = 4e6
