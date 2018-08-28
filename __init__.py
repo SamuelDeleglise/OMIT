@@ -12,7 +12,7 @@ from pyinstruments.datastore.settings import MEDIA_ROOT
 class OMIT(object):
 
 
-    def __init__(self, curve_id_s, large_curve_id):
+    def __init__(self, curve_id_s, large_curve_id, portion=False):
         self.curve_id_s = curve_id_s
         self.curves=[CurveDB.objects.get(id=curve_id) for curve_id in
                      self.curve_id_s]
@@ -22,7 +22,18 @@ class OMIT(object):
                                 self.curves])
         self.large_curve_id = large_curve_id
         self.large_curve = CurveDB.objects.get(id=large_curve_id)
-        self.portion_of_large_curve = self.large_curve.childs.first().childs.first()
+        if portion:
+            self.portion_of_large_curve = self.large_curve.childs.first()
+        else:
+            self.portion_of_large_curve=self.large_curve
+        fit=None
+        for child in self.portion_of_large_curve.childs.all():
+            if 'fit_microwave_cavity' in child.name:
+                fit = child
+                break
+        if fit is None:
+            fit = self.portion_of_large_curve.fit('microwave_cavity', autosave=True)
+        self.portion_of_large_curve=fit
         self.CAVITY_FREQUENCY = self.portion_of_large_curve.params["x0"]
         self.cavity_Qi = self.portion_of_large_curve.params["Q_i"]
         self.cavity_Qc = self.portion_of_large_curve.params["Q_c"]
@@ -90,15 +101,19 @@ class OMIT(object):
         return t_bis
 
     def fit_func(self, probes, n, params):
-        K_coop, Q_m, *nu_m_s = params
+        K_coop, Q_m, *nu_m_s_and_nu_0 = params
+        nu_m_s = nu_m_s_and_nu_0[:int(len(nu_m_s_and_nu_0)/2)]
+        nu_0_s = nu_m_s_and_nu_0[int(len(nu_m_s_and_nu_0)/2):]
         if len(nu_m_s)>1:
             nu_m = nu_m_s[self.ns.index(n)]
+            nu_0 = nu_0_s[self.ns.index(n)]
         else:
             nu_m = self.MECHANICAL_FREQUENCY
+            nu_0 = self.CAVITY_FREQUENCY
         return [self.transmission(nu_probe,
                                 n,
                                 self.PUMP_FREQUENCY,
-                                self.CAVITY_FREQUENCY,
+                                nu_0,
                                 self.KAPPA_HZ,
                                 K_coop,
                                 Q_m,
@@ -120,25 +135,37 @@ class OMIT(object):
 
     def to_minimize(self, params, ns, probes, datas):
 
-        K_coop, Q_m, *nu_m_s = params
+        K_coop, Q_m, *nu_m_s_and_nu_0 = params
+        nu_m_s = nu_m_s_and_nu_0[:int(len(nu_m_s_and_nu_0)/2)]
+        nu_0_s = nu_m_s_and_nu_0[int(len(nu_m_s_and_nu_0)/2):]
         nu_m_s_all = [nu_m for nu_m in nu_m_s for i in range(int(len(
+            datas)/self.n_curves))]
+        nu_0_s_all = [nu_0 for nu_0 in nu_0_s for i in range(int(len(
             datas)/self.n_curves))]
         return np.array([np.abs(self.transmission(nu_probe, n,
                                         self.PUMP_FREQUENCY,
-                                                self.CAVITY_FREQUENCY,
+                                                nu_0,
                                                 self.KAPPA_HZ, K_coop, Q_m,
                                                 nu_m,self.ETA_C)-data/self.normalization)
                          for
-                       nu_probe, n, data, nu_m in zip(probes, ns,
-                                                datas, nu_m_s_all)]).flatten()
+                       nu_probe, n, data, nu_m, nu_0 in zip(probes, ns,
+                                                datas, nu_m_s_all,
+                                                            nu_0_s_all)]).flatten()
+
 
     def plot_global_fit(self, one_plot=False, plot_guess=True, plot_fit=True,
-                        save=False, abs=False, title=None, curves=1.,
+                        save=False, abs=False, title=None, curves=None,
                         large=False, plot_color_bar=True, plot_title=True,
                         xlabel=True):
         self.one_plot=one_plot
+        if curves is not None:
+            ind_s = [np.int(curve*(len(self.ns)-1)) for curve in
+                     curves]
+        else:
+            ind_s = range(len(self.ns))
+
         for ind, tuple in enumerate(zip(self.datas, self.ns, self.probes)) :
-            if float(ind)/len(self.datas)<=curves:
+            if ind in ind_s:
                 datas, n, probes = tuple
                 if large:
                     offset_freq = self.CAVITY_FREQUENCY
@@ -147,8 +174,10 @@ class OMIT(object):
                     offset_freq = \
                         self.PUMP_FREQUENCY+self.MECHANICAL_FREQUENCY
                     scale_freq=1.
+                if not one_plot:
+                    self.fig_subplots = plt.figure()
                 if self.fig_subplots is None:
-                    if ((ind==0 and one_plot) or not one_plot):
+                    if (ind==0 and one_plot):
                         self.fig_subplots = plt.figure()
                 self.probes_fit = np.linspace(np.min(self.probes), np.max(
                     self.probes), 10000)
@@ -302,32 +331,110 @@ class OMIT(object):
             self.KAPPA_HZ**2+4.*self.DELTA_PUMP**2)
 
 
-    def get_data_from_scans(self):
+    def get_data_from_scans(self, get_bandwidths = False,
+                            get_frequencies=False, get_normalization = False,
+                            power_threshold = 15, get_mechanical_frequencies
+                            = False):
         ns_all = []
         ns = []
         self.probes_all = []
         self.probes = []
         datas_all = []
         datas = []
+        if get_bandwidths:
+            self.bandwidths = []
+            self.bandwidths_microwave = []
+        if get_frequencies:
+            self.cavity_frequencies = []
+        if get_normalization:
+            self.normalizations = []
+        if get_mechanical_frequencies:
+            self.mechanical_frequencies = []
         for curve in self.curves:
             for child in curve.childs.all():
-                if not "attenuation_pump" in child.params.keys():
-                    ATTENUATION_PUMP = child.params["attenuation"] + 40
-                    child.params["attenuation_pump"] = ATTENUATION_PUMP
-                    child.save()
-                else:
-                    ATTENUATION_PUMP = child.params["attenuation_pump"]
                 power = child.params["Sideband_power"]
-                data = np.conjugate(np.array(child.data.get_values()))
-                probe = np.array(child.data.index)
-                n = self.get_number_of_photons(power, ATTENUATION_PUMP)
-                ns.append(n)
-                datas.append(data)
-                self.probes.append(probe)
-                for t, f in zip(data, probe):
-                    datas_all.append(t)
-                    self.probes_all.append(f)
-                    ns_all.append(n)
+                if power<power_threshold:
+                    if not "attenuation_pump" in child.params.keys():
+                        ATTENUATION_PUMP = child.params["attenuation"] + 40
+                        child.params["attenuation_pump"] = ATTENUATION_PUMP
+                        child.save()
+                    else:
+                        ATTENUATION_PUMP = child.params["attenuation_pump"]
+                    if get_bandwidths:
+                        fit = None
+                        for grandchild in child.childs.all():
+                            if 'lorentz_complex_sam' in grandchild.name:
+                                fit=grandchild
+                                break
+                        if fit is None:
+                            fit = child.fit('lorentz_complex_sam', autosave=True)
+                        self.bandwidths.append(fit.params['bandwidth'])
+                        large = None
+                        for grandchild in curve.childs.all():
+                            if 'large_curve' or 'na_curve' in grandchild.name:
+                                large = grandchild
+                                if 'na_curve' in grandchild.name:
+                                    large.name='large_curve'
+                                    large.save()
+                                break
+                        assert large is not None
+                        fit_large = large.fit('lorentz_complex_sam', autosave=True)
+                        self.bandwidths_microwave.append(fit_large.params['bandwidth'])
+                        fit_large.delete()
+                    if get_frequencies:
+                        large = None
+                        for grandchild in curve.childs.all():
+                            if 'large_curve' or 'na_curve' in grandchild.name:
+                                large=grandchild
+                                if 'na_curve' in grandchild.name:
+                                    large.name='large_curve'
+                                    large.save()
+                                break
+                        assert large is not None
+                        fit = None
+                        for grandgrandchild in large.childs.all():
+                            if 'fit' in grandgrandchild.name:
+                                fit=grandgrandchild
+                                break
+                        if fit is None:
+                            fit = large.fit('microwave_cavity', autosave=True)
+                        self.cavity_frequencies.append(fit.params['x0'])
+                    if get_mechanical_frequencies:
+                        fit = None
+                        for grandchild in child.childs.all():
+                            if 'lorentz_complex_sam' in grandchild.name:
+                                fit = grandchild
+                                break
+                        if fit is None:
+                            fit = child.fit('lorentz_complex_sam',
+                                            autosave=True)
+                        self.mechanical_frequencies.append(fit.params[
+                                                               'x0']-self.PUMP_FREQUENCY)
+                    if get_normalization:
+                        large = None
+                        for grandchild in curve.childs.all():
+                            if 'large_curve' or 'na_curve' in grandchild.name:
+                                large = grandchild
+                                if 'na_curve' in grandchild.name:
+                                    large.name = 'large_curve'
+                                    large.save()
+                                break
+                        assert large is not None
+                        self.normalizations.append(0.5*(np.mean(
+                            large.data.get_values()[:10]+large.data.get_values()[
+                                -10:])))
+
+
+                    data = np.conjugate(np.array(child.data.get_values()))
+                    probe = np.array(child.data.index)
+                    n = self.get_number_of_photons(power, ATTENUATION_PUMP)
+                    ns.append(n)
+                    datas.append(data)
+                    self.probes.append(probe)
+                    for t, f in zip(data, probe):
+                        datas_all.append(t)
+                        self.probes_all.append(f)
+                        ns_all.append(n)
         self.ns_all = ns_all
         self.ns = ns
         self.datas_all = datas_all
@@ -336,7 +443,7 @@ class OMIT(object):
         self.datas = datas
 
     def plot_large_guess(self, abs=False, plot_fit=True, legend=True,
-                         save=False):
+                         save=False, plot_fit_Geerlings=False):
         if self.fig_large is None:
             self.fig_large=plt.figure()
         freqs = (self.large_curve.data.index-self.CAVITY_FREQUENCY)/1e6
@@ -351,6 +458,16 @@ class OMIT(object):
                                  0,
                                  params_large_guess)
                         ,abs, label="fit 0 coop")
+        if plot_fit_Geerlings:
+            fit = None
+            for child in self.large_curve.childs.all():
+                if 'fit_microwave_cavity' in child.name:
+                    fit=child
+                    break
+            if fit is None:
+                fit = self.large_curve.fit('microwave_cavity', autosave=True)
+            self.plot_large(freqs,fit.data.get_values()/self.normalization, abs,
+                            label="fit")
         if legend:
             plt.legend()
         self.fig_large.suptitle(r'$\nu_0=${:.2f} GHz, $\nu_m=${:.2f} '
@@ -371,7 +488,7 @@ class OMIT(object):
                                    self.filename_large).replace('.png', '.pdf'))
 
     def guess(self):
-        Q_m = 4e6
+        Q_m = 1e6
         ind = int(np.argmax(self.ns))
         grandchild = self.curves_data[ind]
         for fits in grandchild.childs.all():
@@ -385,7 +502,8 @@ class OMIT(object):
         coop = bandwidth/natural_bandwidth
         K_coop = coop/n
         self.MECHANICAL_FREQUENCY=nu_m
-        return [K_coop, Q_m, *[nu_m for i in range(self.n_curves)]]
+        return [K_coop, Q_m, *self.mechanical_frequencies,
+                *self.cavity_frequencies]
 
 
 
